@@ -117,7 +117,7 @@ export const SlashCommandPicker: React.FC<SlashCommandPickerProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState(initialQuery);
-  const [activeTab, setActiveTab] = useState<string>("custom");
+  const [activeTab, setActiveTab] = useState<string>("default");
 
   const commandListRef = useRef<HTMLDivElement>(null);
 

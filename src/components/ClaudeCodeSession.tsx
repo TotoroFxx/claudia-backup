@@ -149,6 +149,7 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   const isMountedRef = useRef(true);
   const isListeningRef = useRef(false);
   const sessionStartTime = useRef<number>(Date.now());
+  const hasInitialScrolledRef = useRef(false); // Track if we've scrolled to bottom on initial load
 
   // Session metrics state for enhanced analytics
   const sessionMetrics = useRef({
@@ -417,10 +418,19 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     if (displayableMessages.length > 0) {
+      // On initial load, scroll immediately to bottom without animation
+      // After that, use smooth scrolling for new messages
+      const behavior = hasInitialScrolledRef.current ? "smooth" : "auto";
+
       rowVirtualizer.scrollToIndex(displayableMessages.length - 1, {
         align: "end",
-        behavior: "smooth",
+        behavior: behavior,
       });
+
+      // Mark that we've done the initial scroll
+      if (!hasInitialScrolledRef.current) {
+        hasInitialScrolledRef.current = true;
+      }
     }
   }, [displayableMessages.length, rowVirtualizer]);
 
@@ -1866,16 +1876,12 @@ export const ClaudeCodeSession: React.FC<ClaudeCodeSessionProps> = ({
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    // Use virtualizer to scroll to the last item
+                    // Use virtualizer to scroll to the last item instantly
                     if (displayableMessages.length > 0) {
-                      // Scroll to bottom of the container
-                      const scrollElement = parentRef.current;
-                      if (scrollElement) {
-                        scrollElement.scrollTo({
-                          top: scrollElement.scrollHeight,
-                          behavior: "smooth",
-                        });
-                      }
+                      rowVirtualizer.scrollToIndex(displayableMessages.length - 1, {
+                        align: "end",
+                        behavior: "auto", // Use "auto" for instant jump
+                      });
                     }
                   }}
                   className="px-3 py-2 hover:bg-accent rounded-none"

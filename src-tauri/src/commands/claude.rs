@@ -542,7 +542,7 @@ fn get_claude_dir() -> Result<PathBuf> {
         .context("Could not find ~/.claude directory")
 }
 
-/// Gets the actual project path by reading the cwd from the first JSONL entry
+/// Gets the actual project path by reading the cwd from JSONL entries
 fn get_project_path_from_sessions(project_dir: &PathBuf) -> Result<String, String> {
     // Try to read any JSONL file in the directory
     let entries = fs::read_dir(project_dir)
@@ -552,14 +552,17 @@ fn get_project_path_from_sessions(project_dir: &PathBuf) -> Result<String, Strin
         if let Ok(entry) = entry {
             let path = entry.path();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                // Read the first line of the JSONL file
+                // Read the JSONL file and look for a line with cwd
                 if let Ok(file) = fs::File::open(&path) {
                     let reader = BufReader::new(file);
-                    if let Some(Ok(first_line)) = reader.lines().next() {
-                        // Parse the JSON and extract cwd
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&first_line) {
-                            if let Some(cwd) = json.get("cwd").and_then(|v| v.as_str()) {
-                                return Ok(cwd.to_string());
+                    // Read up to 10 lines to find one with cwd
+                    for line in reader.lines().take(10) {
+                        if let Ok(line_content) = line {
+                            // Parse the JSON and extract cwd
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line_content) {
+                                if let Some(cwd) = json.get("cwd").and_then(|v| v.as_str()) {
+                                    return Ok(cwd.to_string());
+                                }
                             }
                         }
                     }
@@ -578,7 +581,39 @@ fn decode_project_path(encoded: &str) -> String {
     // This is a fallback - the encoding isn't reversible when paths contain hyphens
     // For example: -Users-mufeedvh-dev-jsonl-viewer could be /Users/mufeedvh/dev/jsonl-viewer
     // or /Users/mufeedvh/dev/jsonl/viewer
-    encoded.replace('-', "/")
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, the encoded path looks like: E--Data-claude-code-projects-test
+        // We need to convert it to: E:\Data\claude_code\projects\test
+        // Note: underscores in path names are also encoded as hyphens, making this ambiguous
+
+        let mut result = encoded.to_string();
+
+        // First, handle the drive letter pattern (e.g., "E--" -> "E:\")
+        // Windows drive letters are single uppercase letters followed by --
+        if result.len() >= 3 {
+            let first_char = result.chars().next().unwrap();
+            if first_char.is_ascii_uppercase() && result.starts_with(&format!("{}--", first_char)) {
+                result = format!("{}:\\{}", first_char, &result[3..]);
+            }
+        }
+
+        // Replace remaining double hyphens with single backslash (directory separators)
+        // Note: This is still ambiguous as some hyphens might be underscores in the original path
+        result = result.replace("--", "\\");
+
+        // Replace single hyphens with backslash (assuming they are path separators)
+        // This loses information about underscores vs path separators
+        result = result.replace('-', "\\");
+
+        result
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        encoded.replace('-', "/")
+    }
 }
 
 /// Extracts the first valid user message from a JSONL file
@@ -618,6 +653,41 @@ fn extract_first_user_message(jsonl_path: &PathBuf) -> (Option<String>, Option<S
     }
 
     (None, None)
+}
+
+/// Resolve model name using environment variables for proxy compatibility
+///
+/// When using third-party API proxies/gateways, users may configure custom model names
+/// via environment variables like ANTHROPIC_DEFAULT_SONNET_MODEL.
+/// This function maps shorthand model names (sonnet, opus, haiku) to the actual
+/// model names configured in the environment.
+fn resolve_model_from_env(model: &str, env_vars: &std::collections::HashMap<String, String>) -> String {
+    let model_lower = model.to_lowercase();
+
+    // Map shorthand names to their environment variable keys
+    let env_key = match model_lower.as_str() {
+        "sonnet" => Some("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        "opus" => Some("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        "haiku" => Some("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        _ => None,
+    };
+
+    if let Some(key) = env_key {
+        // First check custom env vars from database
+        if let Some(value) = env_vars.get(key) {
+            log::info!("Resolved model '{}' to '{}' from database env var {}", model, value, key);
+            return value.clone();
+        }
+        // Then check system environment
+        if let Ok(value) = std::env::var(key) {
+            log::info!("Resolved model '{}' to '{}' from system env var {}", model, value, key);
+            return value;
+        }
+    }
+
+    // Return original model if no mapping found
+    log::debug!("Using model '{}' as-is (no env var mapping found)", model);
+    model.to_string()
 }
 
 /// Helper function to create a tokio Command with proper environment variables
@@ -698,6 +768,26 @@ fn create_command_with_custom_env(program: &str, custom_env: &std::collections::
         }
         if let Ok(comspec) = std::env::var("COMSPEC") {
             tokio_cmd.env("COMSPEC", comspec);
+        }
+
+        // Set CLAUDE_CODE_GIT_BASH_PATH for Claude CLI on Windows
+        // Claude Code requires git-bash to run properly on Windows
+        if std::env::var("CLAUDE_CODE_GIT_BASH_PATH").is_err() {
+            let git_bash_candidates = [
+                r"D:\APP\Git\bin\bash.exe",
+                r"D:\APP\Git\usr\bin\bash.exe",
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+                r"C:\Program Files (x86)\Git\bin\bash.exe",
+            ];
+
+            for bash_path in &git_bash_candidates {
+                if std::path::Path::new(bash_path).exists() {
+                    log::info!("Setting CLAUDE_CODE_GIT_BASH_PATH to: {}", bash_path);
+                    tokio_cmd.env("CLAUDE_CODE_GIT_BASH_PATH", bash_path);
+                    break;
+                }
+            }
         }
     }
 
@@ -1556,16 +1646,18 @@ pub async fn execute_claude_code(
         }
     };
 
+    // Resolve model name from environment variables for proxy compatibility
+    let resolved_model = resolve_model_from_env(&model, &env_vars);
+
     let claude_path = find_claude_binary(&app)?;
 
     let args = vec![
         "-p".to_string(),
         prompt.clone(),
         "--model".to_string(),
-        model.clone(),
+        resolved_model.clone(),
         "--output-format".to_string(),
         "stream-json".to_string(),
-        "--verbose".to_string(),
         "--dangerously-skip-permissions".to_string(),
     ];
 
@@ -1573,11 +1665,11 @@ pub async fn execute_claude_code(
     #[cfg(target_os = "macos")]
     if claude_path == "claude-code" {
         // TODO: Update sidecar to also use environment variables
-        return spawn_claude_sidecar(app, args, prompt, model, project_path).await;
+        return spawn_claude_sidecar(app, args, prompt, resolved_model, project_path).await;
     }
 
     let cmd = create_system_command_with_env(&claude_path, args, &project_path, &env_vars);
-    spawn_claude_process(app, cmd, prompt, model, project_path).await
+    spawn_claude_process(app, cmd, prompt, resolved_model, project_path).await
 }
 
 /// Continue an existing Claude Code conversation with streaming output
@@ -1604,6 +1696,9 @@ pub async fn continue_claude_code(
         }
     };
 
+    // Resolve model name from environment variables for proxy compatibility
+    let resolved_model = resolve_model_from_env(&model, &env_vars);
+
     let claude_path = find_claude_binary(&app)?;
 
     let args = vec![
@@ -1611,7 +1706,7 @@ pub async fn continue_claude_code(
         "-p".to_string(),
         prompt.clone(),
         "--model".to_string(),
-        model.clone(),
+        resolved_model.clone(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
@@ -1621,11 +1716,11 @@ pub async fn continue_claude_code(
     // On macOS, when the stored path is the special sidecar identifier, use sidecar to spawn
     #[cfg(target_os = "macos")]
     if claude_path == "claude-code" {
-        return spawn_claude_sidecar(app, args, prompt, model, project_path).await;
+        return spawn_claude_sidecar(app, args, prompt, resolved_model, project_path).await;
     }
 
     let cmd = create_system_command_with_env(&claude_path, args, &project_path, &env_vars);
-    spawn_claude_process(app, cmd, prompt, model, project_path).await
+    spawn_claude_process(app, cmd, prompt, resolved_model, project_path).await
 }
 
 /// Resume an existing Claude Code session by ID with streaming output
@@ -1654,6 +1749,9 @@ pub async fn resume_claude_code(
         }
     };
 
+    // Resolve model name from environment variables for proxy compatibility
+    let resolved_model = resolve_model_from_env(&model, &env_vars);
+
     let claude_path = find_claude_binary(&app)?;
 
     let args = vec![
@@ -1662,7 +1760,7 @@ pub async fn resume_claude_code(
         "-p".to_string(),
         prompt.clone(),
         "--model".to_string(),
-        model.clone(),
+        resolved_model.clone(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
@@ -1672,11 +1770,22 @@ pub async fn resume_claude_code(
     // On macOS, when the stored path is the special sidecar identifier, use sidecar to spawn
     #[cfg(target_os = "macos")]
     if claude_path == "claude-code" {
-        return spawn_claude_sidecar(app, args, prompt, model, project_path).await;
+        return spawn_claude_sidecar(app, args, prompt, resolved_model, project_path).await;
     }
 
     let cmd = create_system_command_with_env(&claude_path, args, &project_path, &env_vars);
-    spawn_claude_process(app, cmd, prompt, model, project_path).await
+
+    log::info!("About to spawn Claude process for session: {}", session_id);
+    match spawn_claude_process(app.clone(), cmd, prompt, resolved_model.clone(), project_path.clone()).await {
+        Ok(_) => {
+            log::info!("Successfully spawned Claude process for session: {}", session_id);
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("Failed to spawn Claude process for session {}: {}", session_id, e);
+            Err(e)
+        }
+    }
 }
 
 /// Cancel the currently running Claude Code execution

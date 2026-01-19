@@ -35,6 +35,35 @@ import {
   WebFetchWidget,
 } from "./ToolWidgets";
 import { handleError } from "@/lib/errorHandler";
+
+/**
+ * Known Claude Code built-in slash commands that should not trigger "Unknown skill" warnings
+ */
+const KNOWN_SLASH_COMMANDS = [
+  "clear", "compact", "context", "cost", "init", "pr-comments",
+  "release-notes", "review", "security-review", "help", "model",
+  "remember", "tasks", "agents"
+];
+
+/**
+ * Clean result message by removing "Unknown skill" warnings for known slash commands
+ */
+function cleanResultMessage(result: string): string {
+  if (!result) return result;
+
+  // Pattern: "Unknown skill: <command>" where command is a known slash command
+  const unknownSkillPattern = /Unknown skill:\s*([a-z-]+)/gi;
+
+  return result.replace(unknownSkillPattern, (match, commandName) => {
+    // If this is a known slash command, remove the warning
+    if (KNOWN_SLASH_COMMANDS.includes(commandName.toLowerCase())) {
+      return '';
+    }
+    // Otherwise keep the original message
+    return match;
+  }).trim();
+}
+
 /**
  * Props interface for the StreamMessage component
  */
@@ -793,7 +822,7 @@ const StreamMessageComponent: React.FC<StreamMessageProps> = ({
                         },
                       }}
                     >
-                      {message.result}
+                      {cleanResultMessage(message.result)}
                     </ReactMarkdown>
                   </div>
                 )}

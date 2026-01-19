@@ -103,7 +103,7 @@ function parseArguments(args) {
  * @returns {string} - The version to use
  */
 function determineClaudeCodeVersion(cliVersion) {
-  const defaultVersion = "1.0.83";
+  const defaultVersion = "2.1.12";
 
   if (cliVersion) {
     log.info(`\n🔍 Using Claude Code version from CLI argument: ${cliVersion}`);
